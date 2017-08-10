@@ -1,0 +1,214 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+#ifdef __APPLE__
+#include <OpenCL/opencl.h>
+#else
+#include <CL/cl.h>
+#endif
+
+
+int main(void)
+{
+    cl_int ret;
+    
+    cl_platform_id platform_id = NULL;
+    cl_device_id device_id = NULL;
+    cl_context context = NULL;
+    cl_command_queue command_queue = NULL;
+    cl_mem memObj1 = NULL;
+    cl_mem memObj2 = NULL;
+    char *kernelSource = NULL;
+    cl_program program = NULL;
+    cl_kernel kernel = NULL;
+    int *pInputBuffer1 = NULL;
+    int *pInputBuffer2 = NULL;
+    int *pOutputBuffer = NULL;
+    
+    clGetPlatformIDs(1, &platform_id, NULL);
+    if(platform_id == NULL)
+    {
+        puts("Get OpenCL platform failed!");
+        goto FINISH;
+    }
+    
+    clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_GPU, 1, &device_id, NULL);
+    if(device_id == NULL)
+    {
+        puts("No GPU available as a compute device!");
+        goto FINISH;
+    }
+    
+    context = clCreateContext(NULL, 1, &device_id, NULL, NULL, &ret);
+    if(context == NULL)
+    {
+        puts("Context not established!");
+        goto FINISH;
+    }
+    
+    command_queue = clCreateCommandQueue(context, device_id, 0, &ret);
+    if(command_queue == NULL)
+    {
+        puts("Command queue cannot be created!");
+        goto FINISH;
+    }
+    
+    // Specify the path of the kernel source
+    const char *pFileName = "/Users/zennychen/Downloads/test.cl";
+    
+    FILE *fp = fopen(pFileName, "r");
+    if (fp == NULL)
+    {
+        puts("The specified kernel source file cannot be opened!");
+    goto FINISH;
+    }
+    fseek(fp, 0, SEEK_END);
+    const long kernelLength = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    
+    kernelSource = malloc(kernelLength);
+    
+    fread(kernelSource, 1, kernelLength, fp);
+    fclose(fp);
+    
+    program = clCreateProgramWithSource(context, 1, (const char**)&kernelSource, (const size_t*)&kernelLength, &ret);
+    ret = clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
+    if (ret != CL_SUCCESS)
+    {
+        size_t len;
+        char buffer[8 * 1024];
+        
+        printf("Error: Failed to build program executable!\n");
+        clGetProgramBuildInfo(program, device_id, CL_PROGRAM_BUILD_LOG, sizeof(buffer), buffer, &len);
+        printf("%s\n", buffer);
+        goto FINISH;
+    }
+    
+    kernel = clCreateKernel(program, "test", &ret);
+    if(kernel == NULL)
+    {
+        puts("Kernel failed to create!");
+        goto FINISH;
+    }
+    
+    const size_t contentLength = sizeof(*pInputBuffer1) * 1024 * 1024;
+    
+    // 这里预分配的缓存大小为4MB，第一个参数是读写的
+    memObj1 = clCreateBuffer(context, CL_MEM_READ_WRITE, contentLength, NULL, &ret);
+    if(memObj1 == NULL)
+    {
+        puts("Memory object1 failed to create!");
+        goto FINISH;
+    }
+    
+    // 这里预分配的缓存大小为4MB，第一个参数是只读的
+    memObj2 = clCreateBuffer(context, CL_MEM_READ_ONLY, contentLength, NULL, &ret);
+    if(memObj1 == NULL)
+    {
+        puts("Memory object2 failed to create!");
+        goto FINISH;
+    }
+    
+    ret = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&memObj1);
+    ret |= clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&memObj2);
+    
+    if(ret != CL_SUCCESS)
+    {
+        puts("Set arguments error!");
+        goto FINISH;
+    }
+    
+    // 以下为在主机端分配输入缓存
+    pInputBuffer1 = malloc(contentLength);
+    pInputBuffer2 = malloc(contentLength);
+    
+    // 然后对此工作缓存进行初始化
+    for(int i = 0; i < 1024 * 1024; i++)
+        pInputBuffer1[i] = i + 1;
+    
+    memset(pInputBuffer2, 0, contentLength);
+    
+    // 然后分配输出缓存
+    pOutputBuffer = malloc(contentLength);
+    
+    // 先将第一个参数的数据传入GPU端，以后就不去改动了
+    ret = clEnqueueWriteBuffer(command_queue, memObj1, CL_TRUE, 0, contentLength, pInputBuffer1, 0, NULL, NULL);
+    if(ret != CL_SUCCESS)
+    {
+        puts("Data transfer failed");
+        goto FINISH;
+    }
+    
+    int count = 5;  // 执行5次循环
+    
+    do
+    {
+        // 先将第二个参数传给GPU
+        ret = clEnqueueWriteBuffer(command_queue, memObj2, CL_TRUE, 0, contentLength, pInputBuffer2, 0, NULL, NULL);
+        if(ret != CL_SUCCESS)
+        {
+            puts("Data transfer failed");
+            goto FINISH;
+        }
+        
+        // 这里指定将总共有1024 * 1024个work-item
+        ret = clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, (const size_t[]){1024 * 1024}, NULL, 0, NULL, NULL);
+        
+        // 将结果拷贝给主机端
+        ret = clEnqueueReadBuffer(command_queue, memObj1, CL_TRUE, 0, contentLength, pOutputBuffer, 0, NULL, NULL);
+        
+        // 做次同步，这里偷懒，不用wait event机制了～
+        clFinish(command_queue);
+        
+        // 做校验
+        const int newValue = 5 - count + 1;
+        const int addition = (5 - count) * newValue / 2;
+        for(int i = 0; i < 1024 * 1024; i++)
+        {
+            if(pOutputBuffer[i] != i + 1 + addition)
+            {
+                puts("Result error!");
+                break;
+            }
+        }
+        
+        // 最后，给第二个缓存初始化新数据
+        for(int i = 0; i < 1024 * 1024; i++)
+            pInputBuffer2[i] = newValue;
+    }
+    while(--count > 0);
+    
+    
+FINISH:
+    
+    /* Finalization */
+    if(pInputBuffer1 != NULL)
+        free(pInputBuffer1);
+    if(pInputBuffer2 != NULL)
+        free(pInputBuffer2);
+    if(pOutputBuffer != NULL)
+        free(pOutputBuffer);
+    
+    if(kernelSource != NULL)
+        free(kernelSource);
+    
+    if(memObj1 != NULL)
+        clReleaseMemObject(memObj1);
+    if(memObj2 != NULL)
+        clReleaseMemObject(memObj2);
+    
+    if(kernel != NULL)
+        clReleaseKernel(kernel);
+    
+    if(program != NULL)
+        clReleaseProgram(program);
+    
+    if(command_queue != NULL)
+        clReleaseCommandQueue(command_queue);
+    
+    if(context != NULL)
+        clReleaseContext(context);
+    
+    return 0;
+}
