@@ -12,8 +12,9 @@
 #define ARRAY_SIZE 4096
 
 #define MANHATTAN_DIS_KERNEL "distance_sq_ker"
-#define MIN_DISTANCE_KERNEL "min_distance_reduction"
-#define UPFATE_WEIGHT_KERNEL "update_weight"
+#define GAUSSIAN_KERNEL "gaussian_ker"
+#define UPDATE_KERNEL "update_weight"
+
 
 
 #include <math.h>
@@ -41,9 +42,10 @@ using namespace std;
 
 	// claim parameters
 	cl_int row, col, weight_ind;
-	cl_int const train_sample_num = 900;
-	cl_int const total_sample_num = 900;
-	cl_int const neuron_num = 80;
+	cl_int const train_sample_num = 800;
+	cl_int const total_sample_num = 800;
+	cl_int const neuron_num = 68;
+	cl_int const size_parallel = neuron_num;
 	cl_int interations = 2;
 
 
@@ -56,7 +58,8 @@ using namespace std;
 	cl_context context;
 	cl_program program;
 	cl_kernel vector_kernel, complete_kernel, distance_sq_kernel;
-	cl_kernel min_distance_kernel, update_weight_kernel;
+	cl_kernel gaussian_kernel, update_kernel;
+
 	cl_command_queue queue;
 	cl_event start_event, end_event;
 	cl_int i, err;
@@ -67,12 +70,13 @@ using namespace std;
 	float data_test[ARRAY_SIZE];
 	// float sum, actual_sum;
 	// cl_mem data_buffer, sum_buffer;
-	cl_mem weight_buffer, input_buffer;
-	cl_mem distance_buffer, diff_buffer;
+	cl_mem centor_buffer, input_buffer;
+	cl_mem distance_sq_buffer, diff_buffer;
 	cl_mem winner_dis_buffer;
 	cl_mem winner_ind_buffer;
 	cl_mem neighbourhood_value_buf;
 	cl_mem local_weight_size_buf;
+	cl_mem radius_buf, gaussian_buf, weight_gau_buf;
 	cl_ulong time_start, time_end, total_time;
 
 
@@ -162,22 +166,22 @@ cl_program build_program(cl_context ctx, cl_device_id dev, const char* filename)
 
 
 // find winner function
-void distance_sq_func(int input_index, cl_int my_neuron_num, cl_int my_max_weight_size, cl_int my_local_weight_size,size_t my_size_tmp,cl_mem my_dis_sq_buf, cl_mem my_diff_buf, cl_kernel my_dis_kernel, cl_command_queue my_queue){
+float * distance_sq_func(int input_index, cl_int my_neuron_num, size_t my_size_tmp,cl_mem my_dis_sq_buf, cl_mem my_diff_buf, cl_kernel my_dis_kernel, cl_command_queue my_queue){
 
 	// Assign the index representing the start of the current input vector to the distance kernel
-	err = clSetKernelArg(my_dis_kernel, 5, sizeof(int), &input_index);
-	// if (err < 0) {
-	// 	perror("Couldn't create a kernel argument for distance_sq_kernel");
-	// 	exit(1);
-	// }
+	err = clSetKernelArg(my_dis_kernel, 6, sizeof(int), &input_index);
+	if (err < 0) {
+		perror("Couldn't create a kernel argument for distance_sq_kernel");
+		exit(1);
+	}
 
 	// Enqueue kernel with as many work items as there are neurons in the map
 	err = clEnqueueNDRangeKernel(my_queue, my_dis_kernel, 1, NULL, &my_size_tmp, NULL, 0, NULL, NULL);
-	// if (err < 0) {
-	// 	perror("Couldn't enqueue the distance_sq_kernel");
-	// 	cout<< err;
-	// 	exit(1);
-	// }
+	if (err < 0) {
+		perror("Couldn't enqueue the distance_sq_kernel");
+		cout<< err;
+		exit(1);
+	}
 
 	//enqueue is non-blocking, so we need wait using clfinish to make sure this queue is finished before proceeding.
 	clFinish(my_queue);
@@ -188,7 +192,7 @@ void distance_sq_func(int input_index, cl_int my_neuron_num, cl_int my_max_weigh
 	err = clEnqueueReadBuffer(my_queue, my_dis_sq_buf, CL_TRUE, 0,
 		my_neuron_num * sizeof(float), distance_sq, 0, NULL, NULL);
 	if (err < 0) {
-		perror("Couldn't read the distance_buffer");
+		perror("Couldn't read the distance_sq_buffer");
 		cout << err << ":err:\n";
 		exit(1);
 	}
@@ -197,9 +201,118 @@ void distance_sq_func(int input_index, cl_int my_neuron_num, cl_int my_max_weigh
 		cout << "distance_sq[" << i << "] = " << distance_sq[i] << "\n";
 	}
 
-	
+	return distance_sq;
+
 
 }
+
+
+float * gaussian_func(cl_mem my_gaussian_buf, cl_mem my_dis_sq_buf, cl_mem my_radius_buf, size_t my_size_tmp, int my_neuron_num, cl_kernel my_gaussian_kernel, cl_command_queue my_queue){
+
+	// Assign the index representing the start of the current input vector to the distance kernel
+	err = clSetKernelArg(my_gaussian_kernel, 0, sizeof(cl_mem), &my_dis_sq_buf);
+	if (err < 0) {
+		perror("Couldn't create a kernel argument 0 for my_gaussian_kernel");
+		exit(1);
+	}
+
+	// err = clSetKernelArg(my_gaussian_kernel, 1, sizeof(cl_mem), &my_radius_buf);
+	// if (err < 0) {
+	// 	perror("Couldn't create a kernel argument 1 for my_gaussian_kernel");
+	// 	exit(1);
+	// }
+
+	err = clSetKernelArg(my_gaussian_kernel, 2, sizeof(cl_mem), &my_gaussian_buf);
+	if (err < 0) {
+		perror("Couldn't create a kernel argument 2 for my_gaussian_kernel");
+		exit(1);
+	}
+
+
+
+
+	// Enqueue kernel with as many work items as there are neurons in the map
+	err = clEnqueueNDRangeKernel(my_queue, my_gaussian_kernel, 1, NULL, &my_size_tmp, NULL, 0, NULL, NULL);
+	if (err < 0) {
+		perror("Couldn't enqueue the distance_sq_kernel");
+		cout<< err;
+		exit(1);
+	}
+
+	//enqueue is non-blocking, so we need wait using clfinish to make sure this queue is finished before proceeding.
+	clFinish(my_queue);
+
+// 	/* Read the result */
+
+	float *gaussian_read = (float*)malloc(sizeof(float)*my_neuron_num);
+	err = clEnqueueReadBuffer(my_queue, my_gaussian_buf, CL_TRUE, 0,
+		my_neuron_num * sizeof(float), gaussian_read, 0, NULL, NULL);
+	if (err < 0) {
+		perror("Couldn't read the my_gaussian_buf");
+		cout << err << ":err:\n";
+		exit(1);
+	}
+
+	for(int i = 0; i<my_neuron_num; i++){
+		cout << "gaussian_read[" << i << "] = " << gaussian_read[i] << "\n";
+	}
+
+	return gaussian_read;
+
+
+}
+
+
+
+void update_func(cl_mem my_weight_gau_buf, cl_mem my_gaussian_buf, float my_error, float my_neuron_num, size_t my_size_tmp, cl_kernel my_update_kernel, cl_command_queue my_queue){
+
+	// Assign the index representing the start of the current input vector to the distance kernel
+	err = clSetKernelArg(my_update_kernel, 0, sizeof(cl_mem), &my_weight_gau_buf);
+	if (err < 0) {
+		perror("Couldn't create a kernel argument 0 for my_update_kernel");
+		exit(1);
+	}
+
+	err = clSetKernelArg(my_update_kernel, 1, sizeof(cl_mem), &my_gaussian_buf);
+	if (err < 0) {
+		perror("Couldn't create a kernel argument 1 for my_update_kernel");
+		exit(1);
+	}
+
+
+
+
+
+	// Enqueue kernel with as many work items as there are neurons in the map
+	err = clEnqueueNDRangeKernel(my_queue, my_update_kernel, 1, NULL, &my_size_tmp, NULL, 0, NULL, NULL);
+	if (err < 0) {
+		perror("Couldn't enqueue the my_update_kernel");
+		cout<< err;
+		exit(1);
+	}
+
+	//enqueue is non-blocking, so we need wait using clfinish to make sure this queue is finished before proceeding.
+	clFinish(my_queue);
+
+// 	/* Read the result */
+
+	float *weight_gau_read = (float*)malloc(sizeof(float)*my_neuron_num);
+	err = clEnqueueReadBuffer(my_queue, my_weight_gau_buf, CL_TRUE, 0,
+		my_neuron_num * sizeof(float), weight_gau_read, 0, NULL, NULL);
+	if (err < 0) {
+		perror("Couldn't read the my_gaussian_buf");
+		cout << err << ":err:\n";
+		exit(1);
+	}
+
+	for(int i = 0; i<my_neuron_num; i++){
+		cout << "weight_gau_read[" << i << "] = " << weight_gau_read[i] << "\n";
+	}
+
+	// return weight_gau_read;
+}
+
+
 
 
 /*
@@ -214,16 +327,14 @@ int main() {
 	// remove("updated_weights.txt");
 	// remove("radius.txt");
 	// remove("inputs.txt");
-    
-
-		
-
 
 	// read input file
 	ifstream in("ECGdata.csv");
 	string line, field;
 	vector< vector<string> > array;  // the 2D array
 	vector<string> v;                // array of values for one line only
+
+	float learning_rate = 0.008;
 
 	while (getline(in, line))    // get next line in file
 	{
@@ -240,7 +351,10 @@ int main() {
 	}
 
 	// print out what was read in
-
+	float weight_gau[neuron_num] = {0};
+	for (int i = 0; i<neuron_num; i++){
+		weight_gau[i] =  (rand() / double(RAND_MAX))*1.9*0.1 + 0.1;   //1.9 is the range of actual value;
+	}	
 
 // string str;
 // float f=atof(str.c_str());
@@ -287,22 +401,13 @@ int main() {
 	/* Create data_test buffer */
 	// float inputs_1[2] = {1.01, 0.99};
 	float inputs_1[max_weight_size] = {0};
-
 	// for (int i = 0; i < weight_size[0]; i++){
 	// 	cout << "input " << inputs_1[i] << "\n";
 	// }
 
 	time(&t_start) ;
 
-	int neighbourhood_threshold = 2;
-	int winner_ind = {0};
-	float learning_rate = 0.07;
 
-	// float weights_1[32] = {0.100, 	0.200, 	0.300, 	0.400, 	0.50,  0.60,  0.70,  0.80,  0.90,  1,	1.1,  1.2,  1.3,  1.4,  1.5,  1.6,  1.7,  1.8,  1.9,  2,	2.1,  2.2,  2.3,  2.4,  2.5,  2.6,  2.7,  2.8,  2.9,  3,	3.1,  3.2};
-	float weights_1[max_weight_size*neuron_num] = {0};
-	// float weights_1[weight_size_tmp*net_size_tmp*net_size_tmp];
-
-		// cout << "ppppp1: "  << "\n";
 
 
 	ifstream in_local("local_size.csv",ios::in); 
@@ -318,7 +423,7 @@ int main() {
 		while (getline(ss, field_local, ','))  // break line into comma delimitted fields
 		{
 			v_local.push_back(field_local);  // add each field to the 1D array
-			// cout << field << "\n";
+			cout << field_local << "\n";
 		}
 		array_local.push_back(v_local);  // add the 1D array to the 2D array
 	}
@@ -332,7 +437,9 @@ int main() {
 
 
 
-	ifstream in_centors("updated_weights.csv",ios::in);
+	ifstream in_centors("centorss.csv",ios::in);
+	// ifstream in_centors("updated_weights.csv",ios::in);
+
 	string line_cen, field_cen;
 	vector< vector<string> > array_cen;  // the 2D array
 	vector<string> v_cen;   
@@ -362,7 +469,9 @@ int main() {
 
 
 
-	ifstream in_radius("radius.csv",ios::in); 
+	ifstream in_radius("radiuss.csv",ios::in); 
+	// ifstream in_radius("radius.csv",ios::in); 
+
 	string line_rad, field_rad;
 	vector< vector<string> > array_rad;  // the 2D array
 	vector<string> v_rad;                // array of values for one line only
@@ -384,30 +493,69 @@ int main() {
 	for (size_t i = 0; i<neuron_num; i++)
 	{
 		
-		radius_array[i] = atof(array_rad[i][0].c_str());
+		radius_array[i] = atof(array_rad[i][0].c_str())/6;
 
 	}
+
+
+	ifstream in_act("actual.csv",ios::in); 
+	string line_act, field_act;
+	vector< vector<string> > array_act;  // the 2D array
+	vector<string> v_act;                // array of values for one line only
+
+	while (getline(in_act, line_act))    // get next line in file
+	{
+		v_act.clear();
+		stringstream ss(line_act);
+
+		while (getline(ss, field_act, ','))  // break line into comma delimitted fields
+		{
+			v_act.push_back(field_act);  // add each field to the 1D array
+			cout << field_act << "\n";
+		}
+
+		array_act.push_back(v_act);  // add the 1D array to the 2D array
+	}
+	float act_array [total_sample_num] = {0};
+	for (size_t i = 0; i<total_sample_num; i++)
+	{
+		
+		act_array[i] = atof(array_act[i][0].c_str());
+		cout << "act_array [" << act_array[i] << "\n";
+
+	}
+
+
+
 
 	
 
 
-	// weight_buffer = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, 16*2 * sizeof(float), weights_1, &err);
-	weight_buffer = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, max_weight_size*neuron_num * sizeof(float), centors_array, &err);
+	// centor_buffer = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, 16*2 * sizeof(float), weights_1, &err);
+	centor_buffer = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, max_weight_size*neuron_num * sizeof(float), centors_array, &err);
 	if (err < 0) {
-		cout << " weight_buffer = clCreateBuffer error" <<err << "\n";
+		cout << " centor_buffer = clCreateBuffer error" <<err << "\n";
 		exit(1);
 	}
+
+	radius_buf = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, neuron_num * sizeof(float), radius_array, &err);
+	if (err < 0) {
+		cout << " radius_buf = clCreateBuffer error" <<err << "\n";
+		exit(1);
+	}
+
+
 
 
 	local_weight_size_buf = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,  neuron_num*sizeof(int), local_weight_size_array, &err);
 	if (err < 0) {
-		cout << ": p weight_buffer = clCreateBuffer error" <<err << "\n";
+		cout << ": p local_weight_size_buf = clCreateBuffer error" <<err << "\n";
 		exit(1);
 	}
 
-	distance_buffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY, neuron_num*sizeof(float), NULL, &err);
+	distance_sq_buffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY, neuron_num*sizeof(float), NULL, &err);
 	if (err < 0) {
-		cout << "distance_buffer = clCreateBuffer error" <<err << "\n";
+		cout << "distance_sq_buffer = clCreateBuffer error" <<err << "\n";
 		exit(1);
 	}
 
@@ -416,6 +564,23 @@ int main() {
 		cout << "diff_buffer = clCreateBuffer error" <<err << "\n";
 		exit(1);
 	}
+
+	gaussian_buf = clCreateBuffer(context, CL_MEM_WRITE_ONLY, neuron_num*sizeof(float), NULL, &err);
+	if (err < 0) {
+		cout << "gaussian_buf = clCreateBuffer error" <<err << "\n";
+		exit(1);
+	}
+
+
+	weight_gau_buf = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, neuron_num * sizeof(float), weight_gau, &err);
+	if (err < 0) {
+		cout << "weight_gau_buf = clCreateBuffer error" <<err << "\n";
+		exit(1);
+	}
+
+
+
+
 
 
 
@@ -435,47 +600,106 @@ int main() {
 		exit(1);
 	};
 
+	gaussian_kernel = clCreateKernel(program, GAUSSIAN_KERNEL, &err);
+	if (err < 0) {
+		perror("Couldn't create a gaussian_kernel");
+		exit(1);
+	};
+
+	update_kernel = clCreateKernel(program, UPDATE_KERNEL, &err);
+	if (err < 0) {
+		perror("Couldn't create a gaussian_kernel");
+		exit(1);
+	};
+
+
 
 	/* Set arguments for distance_sq_kernel*/
 
-	err |= clSetKernelArg(distance_sq_kernel, 1, sizeof(cl_mem), &weight_buffer); // need to be in the loop
-	err |= clSetKernelArg(distance_sq_kernel, 2, sizeof(cl_mem), &distance_buffer);
+	err |= clSetKernelArg(distance_sq_kernel, 1, sizeof(cl_mem), &centor_buffer); // need to be in the loop
+	err |= clSetKernelArg(distance_sq_kernel, 2, sizeof(cl_mem), &distance_sq_buffer);
 	err |= clSetKernelArg(distance_sq_kernel, 3, sizeof(cl_mem), &diff_buffer);
 	err |= clSetKernelArg(distance_sq_kernel, 4, sizeof(cl_mem), &local_weight_size_buf);
 	err |= clSetKernelArg(distance_sq_kernel, 5, sizeof(int), &max_weight_size);
-
 	if (err < 0) {
-		perror("Couldn't create a kernel argument for distance_sq_kernel");
+		perror("Couldn't setup arg for distance_sq_kernel");
 		exit(1);
-	}
+	};
+
+	err = clSetKernelArg(gaussian_kernel, 1, sizeof(cl_mem), &radius_buf);
+	if (err < 0) {
+		perror("Couldn't setup arg for gaussian_kernel");
+		exit(1);
+	};
+
+
+	err = clSetKernelArg(update_kernel, 3, sizeof(float), &learning_rate);
+	if (err < 0) {
+		perror("Couldn't setup arg 3 for update_kernel");
+		exit(1);
+	};
+
+
+
+
 
 	int start_index_1 = 0;
+	float * distance_sq_read;
+	float * gaussian_read;	
+	float predict_err;	
+	float predicted = 0;	
+
+		
+
+
 
 	for (int inte = 0; inte < interations; inte++){
 		for (int i = 0; i < train_sample_num; i++){
-			
 			memcpy(inputs_1,inputs[i],sizeof(inputs_1)); //
 			// cout << "inputs: " << inputs_1[0] << ", " << inputs_1[1] << "\n";
-
-
-			
 			input_buffer = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, max_weight_size * sizeof(float), inputs_1, &err);
 			if (err < 0) {
 				cout << "input_buffer = clCreateBuffer error" <<err << "\n";
 				exit(1);
 			}
-				
+			
 			err = clSetKernelArg(distance_sq_kernel, 0, sizeof(cl_mem), &input_buffer);
 			if (err < 0) {
 				cout << "set  distance_sq_kernel input_buffer error" <<err << "\n";
 				exit(1);
 			}
 
-			distance_sq_func(start_index_1, neuron_num, weight_size, size_parallel, distance_buffer, diff_buffer, distance_sq_kernel, queue);
+			distance_sq_read = distance_sq_func(start_index_1, neuron_num, size_parallel, distance_sq_buffer, diff_buffer, distance_sq_kernel, queue);
+			// cout << "distance_sq_read[0]: " << distance_sq_read[0] << "\n";
 
-				// cout << "pppppp: " << p << "\n";
+			gaussian_read =  gaussian_func(gaussian_buf, distance_sq_buffer, radius_buf, size_parallel, neuron_num, gaussian_kernel, queue);
+			// cout << "gaussian_read[0]: " << gaussian_read[0] << "\n";
 
-			// cout << "winner_ind " << winner_ind << "\n";
+			// void gaussian_func(cl_mem my_gaussian_buf, cl_mem my_dis_sq_buf, cl_mem my_radius_buf, size_t my_size_tmp, int my_neuron_num, cl_kernel my_gaussian_kernel, cl_command_queue my_queue){
+			#pragma unroll
+			for (int neuron_id = 0; neuron_id < neuron_num; neuron_id++){
+				predicted += gaussian_read[neuron_id] * weight_gau[neuron_id];
+			}
+
+			predict_err =  act_array[i] - predicted;
+
+			cout << "actual[] " << i << act_array[i] << "\n";
+			cout << "predicted: " << predicted << "\n";
+			cout << "predict_err[] " << i << predict_err << "\n";
+
+			//update weight_gau
+
+			err = clSetKernelArg(update_kernel, 2, sizeof(float), &predict_err);
+			if (err < 0) {
+				perror("Couldn't setup arg 2 for update_kernel");
+				exit(1);
+			};
+
+			update_func(weight_gau_buf, gaussian_buf, predict_err, neuron_num, size_parallel, update_kernel, queue);
+			// float * update_func(cl_mem my_weight_gau_buf, cl_mem my_gaussian_buf, float my_error, float my_neuron_num, size_t my_size_tmp, cl_kernel my_update_kernel, cl_command_queue my_queue){
+
+
+
 
 		}
 	}
